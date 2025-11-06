@@ -80,9 +80,9 @@ Use ephemeral responses for admin/config commands where appropriate.
 1. **Foundation (in progress)**
    - ✅ Drizzle + PostgreSQL scaffolding committed (config, schema, helper). Migrations will run after provisioning Render Postgres.
    - ✅ Ported Wordle parser + statistics utilities into `src/features/wordle`.
-2. **Core flows**
-   - Implement `onMessage` Wordle ingestion plus `/scores|averages|weekly|podium` commands.
-   - Add `/help`, `/ping`, `/today` parity.
+2. **Core flows (completed)**
+   - ✅ `onMessage` now parses Wordle shares, validates puzzle day, and persists submissions via Drizzle/Postgres.
+   - ✅ `/scores`, `/averages`, `/weekly`, `/podium`, `/today`, `/ping`, `/help` slash commands return live stats computed from stored submissions.
 3. **Config & notifications**
    - Build `/config` commands, store per-chat preferences, wire timing + leaderboard-notification logic.
 4. **Podium media & scheduled digests**
