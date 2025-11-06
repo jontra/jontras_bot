@@ -177,6 +177,10 @@ bot.onSlashCommand('weekly', async (handler, { channelId }) => {
     await respondWithLeaderboard(handler, channelId, 'weekly scores', getWeeklyScoresNow)
 })
 
+bot.onSlashCommand('alltime', async (handler, { channelId }) => {
+    await respondWithLeaderboard(handler, channelId, 'all-time scores', getScores)
+})
+
 bot.onSlashCommand('podium', async (handler, { channelId, args }) => {
     const dayArg = args[0] ? Number.parseInt(args[0], 10) : getWordleDay()
     if (Number.isNaN(dayArg)) {

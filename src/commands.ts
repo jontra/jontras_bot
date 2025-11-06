@@ -5,6 +5,7 @@ const commands = [
     { name: 'scores', description: 'Show overall Wordle leaderboard' },
     { name: 'averages', description: 'Show average guesses leaderboard' },
     { name: 'weekly', description: 'Show weekly Wordle leaderboard' },
+    { name: 'alltime', description: 'Show all-time Wordle leaderboard' },
     { name: 'podium', description: 'Show podium for a specific day' },
     { name: 'today', description: 'Show today‘s Wordle number' },
     { name: 'ping', description: 'Check bot latency' },
