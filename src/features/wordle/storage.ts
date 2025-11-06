@@ -62,14 +62,6 @@ export async function getChannelSubmissions(channelId: string): Promise<WordleRe
     }))
 }
 
-export async function upsertChatSettings(channelId: string) {
-    const client = ensureDb()
-    await client
-        .insert(chatSettings)
-        .values({ channelId })
-        .onConflictDoNothing({ target: chatSettings.channelId })
-}
-
 export async function getActiveChannels(): Promise<string[]> {
     const client = ensureDb()
     const rows = await client.selectDistinct({ channelId: submissions.channelId }).from(submissions)
@@ -110,4 +102,79 @@ function isUniqueViolation(error: unknown): boolean {
     }
     const maybeError = error as { code?: string }
     return maybeError.code === '23505'
+}
+
+export type ChatSettingsRecord = {
+    earlyPodium: boolean
+    earlyPodiumThreshold: number
+    notifyLeaderboard: boolean
+    notifyTiming: boolean
+    digestTime: string
+    timezone: string
+}
+
+export const DEFAULT_CHAT_SETTINGS: ChatSettingsRecord = {
+    earlyPodium: true,
+    earlyPodiumThreshold: 5,
+    notifyLeaderboard: true,
+    notifyTiming: true,
+    digestTime: '19:00',
+    timezone: 'UTC',
+}
+
+type SettingsRow = typeof chatSettings.$inferSelect
+
+export async function getChatSettings(channelId: string): Promise<ChatSettingsRecord> {
+    const client = ensureDb()
+
+    const existing = await client
+        .select()
+        .from(chatSettings)
+        .where(eq(chatSettings.channelId, channelId))
+        .limit(1)
+
+    if (existing.length === 0) {
+        await client.insert(chatSettings).values({ channelId }).onConflictDoNothing({ target: chatSettings.channelId })
+        return { ...DEFAULT_CHAT_SETTINGS }
+    }
+
+    return normalizeSettings(existing[0])
+}
+
+export async function updateChatSettings(
+    channelId: string,
+    patch: Partial<ChatSettingsRecord>,
+): Promise<ChatSettingsRecord> {
+    const client = ensureDb()
+
+    await client
+        .insert(chatSettings)
+        .values({ channelId })
+        .onConflictDoNothing({ target: chatSettings.channelId })
+
+    const updateValues: Partial<SettingsRow> = {}
+
+    if (patch.earlyPodium !== undefined) updateValues.earlyPodium = patch.earlyPodium
+    if (patch.earlyPodiumThreshold !== undefined) updateValues.earlyPodiumThreshold = patch.earlyPodiumThreshold
+    if (patch.notifyLeaderboard !== undefined) updateValues.notifyLeaderboard = patch.notifyLeaderboard
+    if (patch.notifyTiming !== undefined) updateValues.notifyTiming = patch.notifyTiming
+    if (patch.digestTime !== undefined) updateValues.digestTime = patch.digestTime
+    if (patch.timezone !== undefined) updateValues.timezone = patch.timezone
+
+    if (Object.keys(updateValues).length > 0) {
+        await client.update(chatSettings).set(updateValues).where(eq(chatSettings.channelId, channelId))
+    }
+
+    return getChatSettings(channelId)
+}
+
+function normalizeSettings(row: SettingsRow): ChatSettingsRecord {
+    return {
+        earlyPodium: row.earlyPodium ?? DEFAULT_CHAT_SETTINGS.earlyPodium,
+        earlyPodiumThreshold: row.earlyPodiumThreshold ?? DEFAULT_CHAT_SETTINGS.earlyPodiumThreshold,
+        notifyLeaderboard: row.notifyLeaderboard ?? DEFAULT_CHAT_SETTINGS.notifyLeaderboard,
+        notifyTiming: row.notifyTiming ?? DEFAULT_CHAT_SETTINGS.notifyTiming,
+        digestTime: row.digestTime ?? DEFAULT_CHAT_SETTINGS.digestTime,
+        timezone: row.timezone ?? DEFAULT_CHAT_SETTINGS.timezone,
+    }
 }

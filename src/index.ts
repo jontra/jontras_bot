@@ -13,13 +13,17 @@ import {
     type WordleResult,
 } from './features/wordle'
 import {
+    DEFAULT_CHAT_SETTINGS,
     DuplicateSubmissionError,
     DatabaseNotConfiguredError,
     getActiveChannels,
     getChannelSubmissions,
+    getChatSettings,
     hasPodiumBeenSent,
     markPodiumSent,
     saveSubmission,
+    updateChatSettings,
+    type ChatSettingsRecord,
 } from './features/wordle/storage'
 
 const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SECRET!, {
@@ -28,6 +32,64 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
 
 const AWARDS = ['🥇', '🥈', '🥉']
 
+const CONFIG_OPTIONS = {
+    early_podium: {
+        key: 'earlyPodium' as const,
+        label: 'Early podium notifications',
+        kind: 'boolean',
+        description: 'Automatically post the podium once enough players finish.\n',
+    },
+    early_podium_threshold: {
+        key: 'earlyPodiumThreshold' as const,
+        label: 'Early podium threshold',
+        kind: 'number',
+        description: 'Number of unique players required before sending the early podium.\n',
+    },
+    notify_leaderboard: {
+        key: 'notifyLeaderboard' as const,
+        label: 'Leaderboard alerts',
+        kind: 'boolean',
+        description: 'DM players when they pass someone on the leaderboard.\n',
+    },
+    notify_timing: {
+        key: 'notifyTiming' as const,
+        label: 'Timing nudges',
+        kind: 'boolean',
+        description: 'Tell players when they solve much earlier or later than usual.\n',
+    },
+    digest_time: {
+        key: 'digestTime' as const,
+        label: 'Daily digest time',
+        kind: 'time',
+        description: 'Local time (HH:MM, 24h) to deliver the daily summary.\n',
+    },
+    timezone: {
+        key: 'timezone' as const,
+        label: 'Timezone',
+        kind: 'string',
+        description: 'IANA timezone identifier used for scheduling (e.g., UTC, America/New_York).\n',
+    },
+} satisfies Record<
+    string,
+    {
+        key: keyof typeof DEFAULT_CHAT_SETTINGS
+        label: string
+        kind: 'boolean' | 'number' | 'time' | 'string'
+        description: string
+    }
+>
+
+const CONFIG_USAGE =
+    '**Usage:** `/config show` to view settings, `/config set <option> <value>` to update.\n\n' +
+    'Options: `early_podium`, `early_podium_threshold`, `notify_leaderboard`, `notify_timing`, `digest_time`, `timezone`.\n'
+
+type ConfigOption = (typeof CONFIG_OPTIONS)[keyof typeof CONFIG_OPTIONS]
+type ConfigOptionKey = keyof typeof CONFIG_OPTIONS
+
+function isConfigOptionKey(value: string): value is ConfigOptionKey {
+    return value in CONFIG_OPTIONS
+}
+
 bot.onSlashCommand('help', async (handler, { channelId }) => {
     const bullets = [
         '**Available Commands**\n',
@@ -35,11 +97,58 @@ bot.onSlashCommand('help', async (handler, { channelId }) => {
         '• `/averages` — Average guesses leaderboard\n',
         '• `/weekly` — Weekly winners\n',
         '• `/podium [wordle-day]` — Podium for today or a specific day\n',
+        '• `/config show` — View or update channel settings\n',
         '• `/today` — Show today’s Wordle number\n',
         '• `/ping` — Latency check\n',
     ].join('\n')
 
     await handler.sendMessage(channelId, bullets)
+})
+
+bot.onSlashCommand('config', async (handler, { channelId, args }) => {
+    try {
+        if (args.length === 0 || args[0].toLowerCase() === 'show') {
+            const settings = await getChatSettings(channelId)
+            await handler.sendMessage(channelId, buildSettingsMessage(settings))
+            return
+        }
+
+        if (args[0].toLowerCase() !== 'set') {
+            await handler.sendMessage(channelId, CONFIG_USAGE)
+            return
+        }
+
+        if (args.length < 3) {
+            await handler.sendMessage(channelId, 'Usage: `/config set <option> <value>`')
+            return
+        }
+
+        const optionKey = args[1].toLowerCase()
+        if (!isConfigOptionKey(optionKey)) {
+            await handler.sendMessage(channelId, `Unknown option \`${optionKey}\`.\n${CONFIG_USAGE}`)
+            return
+        }
+
+        const option = CONFIG_OPTIONS[optionKey]
+        const valueInput = args.slice(2).join(' ')
+        const parsed = parseSettingValue(option, valueInput)
+        if (!parsed.success) {
+            await handler.sendMessage(channelId, parsed.error)
+            return
+        }
+
+        const updated = await updateChatSettings(channelId, parsed.patch)
+        await handler.sendMessage(
+            channelId,
+            `Updated **${option.label}** to ${formatSettingValue(option, updated[option.key])}.`,
+        )
+    } catch (error) {
+        if (error instanceof DatabaseNotConfiguredError) {
+            await handler.sendMessage(channelId, 'Wordle storage is not configured. Please set `DATABASE_URL` and redeploy the bot.')
+            return
+        }
+        throw error
+    }
 })
 
 bot.onSlashCommand('scores', async (handler, { channelId }) => {
@@ -277,4 +386,85 @@ function buildLeaderboardSection(title: string, leaderboard: Record<string, numb
     const text = `**${title}**\n\n${lines.map((line) => `${line}\n`).join('')}`
     const playerIds = sorted.map(([playerId]) => playerId)
     return { text, playerIds }
+}
+
+function buildSettingsMessage(settings: ChatSettingsRecord): string {
+    const lines: string[] = ['**Channel Settings**', '']
+
+    for (const optionKey of Object.keys(CONFIG_OPTIONS) as ConfigOptionKey[]) {
+        const option = CONFIG_OPTIONS[optionKey]
+        const value = settings[option.key]
+        lines.push(`• \`${optionKey}\`: ${formatSettingValue(option, value)} — ${option.description}`)
+    }
+
+    lines.push('', CONFIG_USAGE)
+    return lines.map((line) => `${line}\n`).join('')
+}
+
+function formatSettingValue(option: ConfigOption, value: ChatSettingsRecord[typeof option.key]): string {
+    switch (option.kind) {
+        case 'boolean':
+            return (value as boolean) ? 'Enabled' : 'Disabled'
+        case 'number':
+            return String(value)
+        case 'time':
+            return value as string
+        case 'string':
+        default:
+            return value as string
+    }
+}
+
+function parseSettingValue(
+    option: ConfigOption,
+    rawValue: string,
+): { success: true; patch: Partial<ChatSettingsRecord> } | { success: false; error: string } {
+    const value = rawValue.trim()
+    if (!value) {
+        return { success: false, error: 'Please provide a value.' }
+    }
+
+    switch (option.kind) {
+        case 'boolean': {
+            const parsed = parseBoolean(value)
+            if (parsed === undefined) {
+                return {
+                    success: false,
+                    error: 'Expected a boolean value (use: `on`, `off`, `yes`, `no`, `true`, `false`).',
+                }
+            }
+            return { success: true, patch: { [option.key]: parsed } as Partial<ChatSettingsRecord> }
+        }
+        case 'number': {
+            const parsed = Number.parseInt(value, 10)
+            if (!Number.isFinite(parsed) || parsed <= 0) {
+                return { success: false, error: 'Please provide a positive number.' }
+            }
+            return { success: true, patch: { [option.key]: parsed } as Partial<ChatSettingsRecord> }
+        }
+        case 'time': {
+            const match = /^(\d{1,2}):(\d{2})$/.exec(value)
+            if (!match) {
+                return { success: false, error: 'Time must be in HH:MM (24-hour) format.' }
+            }
+            const hours = Number(match[1])
+            const minutes = Number(match[2])
+            if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+                return { success: false, error: 'Time must be between 00:00 and 23:59.' }
+            }
+            const normalized = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`
+            return { success: true, patch: { [option.key]: normalized } as Partial<ChatSettingsRecord> }
+        }
+        case 'string':
+        default: {
+            return { success: true, patch: { [option.key]: value } as Partial<ChatSettingsRecord> }
+        }
+    }
+}
+
+function parseBoolean(value: string): boolean | undefined {
+    const normalized = value.toLowerCase()
+    if (['y', 'yes', 'true', 'on', '1', 'enable', 'enabled'].includes(normalized)) return true
+    if (['n', 'no', 'false', 'off', '0', 'disable', 'disabled'].includes(normalized)) return false
+    return undefined
 }

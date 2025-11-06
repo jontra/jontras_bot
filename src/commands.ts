@@ -8,6 +8,7 @@ const commands = [
     { name: 'podium', description: 'Show podium for a specific day' },
     { name: 'today', description: 'Show today‘s Wordle number' },
     { name: 'ping', description: 'Check bot latency' },
+    { name: 'config', description: 'Show or update channel configuration' },
 ] as const satisfies PlainMessage<SlashCommand>[]
 
 export default commands

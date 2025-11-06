@@ -83,8 +83,9 @@ Use ephemeral responses for admin/config commands where appropriate.
 2. **Core flows (completed)**
    - ✅ `onMessage` now parses Wordle shares, validates puzzle day, and persists submissions via Drizzle/Postgres.
    - ✅ `/scores`, `/averages`, `/weekly`, `/podium`, `/today`, `/ping`, `/help` slash commands return live stats computed from stored submissions.
-3. **Config & notifications**
-   - Build `/config` commands, store per-chat preferences, wire timing + leaderboard-notification logic.
+3. **Config & notifications (in progress)**
+   - ✅ `/config show` & `/config set` commands backed by Postgres settings.
+   - ☐ Wire timing/leaderboard notifications to respect stored preferences.
 4. **Podium media & scheduled digests**
    - Implement image generation + attachments; add daily/weekly scheduler that reads chat settings and posts recaps.
 5. **Advanced features**
