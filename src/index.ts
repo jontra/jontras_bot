@@ -196,7 +196,7 @@ bot.onSlashCommand('podium', async (handler, { channelId, args }) => {
     const lines = podium.map((entry, index) => {
         const medal = AWARDS[index] ?? `${index + 1}.`
         const players = entry.playerIds.map(formatMention).join(', ')
-        return `${medal} ${players} — ${entry.guesses}/6`
+        return `${medal} ${players} — ${entry.guesses}/6\n`
     })
 
     const textLines = [`Wordle ${dayArg} podium:`, '', ...lines]
