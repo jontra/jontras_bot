@@ -7,6 +7,8 @@ import {
     getAverages,
     getDayLeaderboardsMulti,
     getScores,
+    getAverageTime,
+    getPlayersPassed,
     getWeeklyScoresNow,
     getWordleDay,
     parseWordleResult,
@@ -31,6 +33,10 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
 })
 
 const AWARDS = ['🥇', '🥈', '🥉']
+
+const MS_PER_MINUTE = 60 * 1000
+const MS_PER_DAY = 24 * 60 * MS_PER_MINUTE
+const WORDLE_EPOCH_UTC = Date.UTC(2021, 5, 20)
 
 const CONFIG_OPTIONS = {
     early_podium: {
@@ -286,6 +292,9 @@ async function handleWordleSubmission(handler: BotHandler, channelId: string, pl
         return
     }
 
+    const previousResults = await getChannelSubmissions(channelId)
+    const settings = await getChatSettings(channelId)
+
     try {
         await saveSubmission(channelId, result)
         const guessText = result.guesses === -1 ? 'X/6' : `${result.guesses}/6`
@@ -293,6 +302,12 @@ async function handleWordleSubmission(handler: BotHandler, channelId: string, pl
         await handler.sendMessage(channelId, `Logged Wordle ${result.wordleDay} (${guessText}) for ${mention}.`, {
             mentions: buildMentions([playerId]),
         })
+
+        const updatedResults = [...previousResults, result]
+
+        await maybeSendEarlyPodium(handler, channelId, settings, updatedResults, result.wordleDay)
+        await maybeNotifyTiming(handler, channelId, settings, previousResults, result)
+        await maybeNotifyLeaderboards(handler, channelId, settings, previousResults, updatedResults, playerId)
     } catch (error) {
         if (error instanceof DuplicateSubmissionError) {
             await handler.sendMessage(channelId, 'You already submitted a result for this Wordle.')
@@ -306,50 +321,74 @@ async function handleWordleSubmission(handler: BotHandler, channelId: string, pl
     }
 }
 
-async function runDailyDigest(wordleDay: number = getWordleDay()): Promise<number> {
+async function runDailyDigest(reference: Date = new Date()): Promise<number> {
     const channels = await getActiveChannels()
     let sentCount = 0
 
     for (const channelId of channels) {
-        const alreadySent = await hasPodiumBeenSent(channelId, wordleDay)
-        if (alreadySent) continue
+        const settings = await getChatSettings(channelId)
+        const localNow = getLocalDateParts(settings.timezone, reference)
+        if (!localNow) continue
+
+        const digestTimeParts = parseTime(settings.digestTime)
+        const windowOpenToday = hasReachedDigestTime(localNow, digestTimeParts)
+
+        const todayWordleDay = getWordleDayForZone(settings.timezone, reference)
+        const yesterdayWordleDay = getWordleDayForZone(settings.timezone, new Date(reference.getTime() - MS_PER_DAY))
+
+        const targetDays = new Set<number>()
+        if (windowOpenToday) {
+            targetDays.add(todayWordleDay)
+        }
+        if (todayWordleDay > yesterdayWordleDay) {
+            targetDays.add(yesterdayWordleDay)
+        }
+
+        if (targetDays.size === 0) {
+            continue
+        }
 
         const results = await getChannelSubmissions(channelId)
-        if (!results.some((result) => result.wordleDay === wordleDay)) {
-            continue
+
+        for (const targetDay of targetDays) {
+            if (targetDay <= 0) continue
+            if (await hasPodiumBeenSent(channelId, targetDay)) continue
+            if (!results.some((result) => result.wordleDay === targetDay)) {
+                continue
+            }
+
+            const sections: { text: string; playerIds: string[] }[] = []
+            const podium = getDayLeaderboardsMulti(results, targetDay)
+            if (podium.length > 0) {
+                const lines = podium.map((entry, index) => {
+                    const medal = AWARDS[index] ?? `${index + 1}.`
+                    const players = entry.playerIds.map(formatMention).join(', ')
+                    return `${medal} ${players} — ${entry.guesses}/6`
+                })
+                const playerIds = podium.flatMap((entry) => entry.playerIds)
+                const text = ['**Wordle ' + targetDay + ' podium**', '', ...lines.map((line) => `${line}\n`)].join('\n')
+                sections.push({ text, playerIds })
+            }
+
+            const overallSection = buildLeaderboardSection('Overall scores', getScores(results), 'pts.')
+            if (overallSection) sections.push(overallSection)
+
+            const weeklySection = buildLeaderboardSection('Weekly wins', getWeeklyScoresNow(results), 'wins')
+            if (weeklySection) sections.push(weeklySection)
+
+            const averagesSection = buildLeaderboardSection('Average guesses', getAverages(results), 'avg guesses')
+            if (averagesSection) sections.push(averagesSection)
+
+            if (sections.length === 0) {
+                continue
+            }
+
+            const message = sections.map((section) => section.text).join('\n\n')
+            const mentions = buildMentions(sections.flatMap((section) => section.playerIds))
+            await bot.sendMessage(channelId, message, { mentions })
+            await markPodiumSent(channelId, targetDay)
+            sentCount++
         }
-
-        const sections: { text: string; playerIds: string[] }[] = []
-        const podium = getDayLeaderboardsMulti(results, wordleDay)
-        if (podium.length > 0) {
-            const lines = podium.map((entry, index) => {
-                const medal = AWARDS[index] ?? `${index + 1}.`
-                const players = entry.playerIds.map(formatMention).join(', ')
-                return `${medal} ${players} — ${entry.guesses}/6`
-            })
-            const playerIds = podium.flatMap((entry) => entry.playerIds)
-            const text = ['**Wordle ' + wordleDay + ' podium**', '', ...lines.map((line) => `${line}\n`)].join('\n')
-            sections.push({ text, playerIds })
-        }
-
-        const overallSection = buildLeaderboardSection('Overall scores', getScores(results), 'pts.')
-        if (overallSection) sections.push(overallSection)
-
-        const weeklySection = buildLeaderboardSection('Weekly wins', getWeeklyScoresNow(results), 'wins')
-        if (weeklySection) sections.push(weeklySection)
-
-        const averagesSection = buildLeaderboardSection('Average guesses', getAverages(results), 'avg guesses')
-        if (averagesSection) sections.push(averagesSection)
-
-        if (sections.length === 0) {
-            continue
-        }
-
-        const message = sections.map((section) => section.text).join('\n\n')
-        const mentions = buildMentions(sections.flatMap((section) => section.playerIds))
-        await bot.sendMessage(channelId, message, { mentions })
-        await markPodiumSent(channelId, wordleDay)
-        sentCount++
     }
 
     return sentCount
@@ -467,4 +506,210 @@ function parseBoolean(value: string): boolean | undefined {
     if (['y', 'yes', 'true', 'on', '1', 'enable', 'enabled'].includes(normalized)) return true
     if (['n', 'no', 'false', 'off', '0', 'disable', 'disabled'].includes(normalized)) return false
     return undefined
+}
+
+async function maybeSendEarlyPodium(
+    handler: BotHandler,
+    channelId: string,
+    settings: ChatSettingsRecord,
+    results: WordleResult[],
+    wordleDay: number,
+) {
+    if (!settings.earlyPodium || settings.earlyPodiumThreshold <= 0) return
+
+    const todaysResults = results.filter((entry) => entry.wordleDay === wordleDay)
+    const uniquePlayers = new Set(todaysResults.map((entry) => entry.playerId))
+
+    if (uniquePlayers.size !== settings.earlyPodiumThreshold) {
+        return
+    }
+
+    const podium = getDayLeaderboardsMulti(todaysResults, wordleDay)
+    if (podium.length === 0) return
+
+    const lines = podium.map((entry, index) => {
+        const medal = AWARDS[index] ?? `${index + 1}.`
+        const players = entry.playerIds.map(formatMention).join(', ')
+        return `${medal} ${players} — ${entry.guesses}/6`
+    })
+
+    const mentions = buildMentions(podium.flatMap((entry) => entry.playerIds))
+    await handler.sendMessage(
+        channelId,
+        [`Early podium unlocked for Wordle ${wordleDay}!`, '', ...lines].join('\n'),
+        { mentions },
+    )
+}
+
+async function maybeNotifyTiming(
+    handler: BotHandler,
+    channelId: string,
+    settings: ChatSettingsRecord,
+    previousResults: WordleResult[],
+    result: WordleResult,
+) {
+    if (!settings.notifyTiming) return
+
+    const personalHistory = previousResults.filter((entry) => entry.playerId === result.playerId)
+    if (personalHistory.length === 0) return
+
+    const { avg, std } = getAverageTime(previousResults, result.playerId)
+    if (!Number.isFinite(avg) || !Number.isFinite(std) || std === 0) {
+        return
+    }
+
+    const diff = result.secondsSinceMidnight - avg
+    const formattedDiff = formatDuration(Math.abs(diff))
+
+    if (diff > std) {
+        await handler.sendMessage(
+            channelId,
+            `${formatMention(result.playerId)} running late? You're ${formattedDiff} after your average.`,
+            { mentions: buildMentions([result.playerId]) },
+        )
+    } else if (diff < -std) {
+        await handler.sendMessage(
+            channelId,
+            `${formatMention(result.playerId)} early bird! You're ${formattedDiff} before your average.`,
+            { mentions: buildMentions([result.playerId]) },
+        )
+    }
+}
+
+async function maybeNotifyLeaderboards(
+    handler: BotHandler,
+    channelId: string,
+    settings: ChatSettingsRecord,
+    previousResults: WordleResult[],
+    updatedResults: WordleResult[],
+    playerId: string,
+) {
+    if (!settings.notifyLeaderboard) return
+
+    const oldScores = getScores(previousResults)
+    const newScores = getScores(updatedResults)
+    const passedScores = getPlayersPassed(oldScores, newScores)[playerId] ?? []
+
+    await announceLeaderboardPasses(handler, channelId, playerId, passedScores, 'overall score')
+
+    const oldAverages = getAverages(previousResults)
+    const newAverages = getAverages(updatedResults)
+    const passedAverages = getPlayersPassed(oldAverages, newAverages)[playerId] ?? []
+
+    await announceLeaderboardPasses(handler, channelId, playerId, passedAverages, 'average guesses')
+
+    const localDay = getLocalDayOfWeek(settings.timezone)
+    if (localDay !== 0) {
+        const oldWeekly = getWeeklyScoresNow(previousResults)
+        const newWeekly = getWeeklyScoresNow(updatedResults)
+        const passedWeekly = getPlayersPassed(oldWeekly, newWeekly)[playerId] ?? []
+        await announceLeaderboardPasses(handler, channelId, playerId, passedWeekly, 'weekly score')
+    }
+}
+
+async function announceLeaderboardPasses(
+    handler: BotHandler,
+    channelId: string,
+    playerId: string,
+    passed: string[],
+    category: string,
+) {
+    if (!passed || passed.length === 0) return
+
+    const mentions = buildMentions([playerId, ...passed])
+    const passedMentions = passed.map(formatMention).join(', ')
+    await handler.sendMessage(
+        channelId,
+        `${formatMention(playerId)} just passed ${passedMentions} in ${category}! 🎉`,
+        { mentions },
+    )
+}
+
+function formatDuration(totalSeconds: number): string {
+    const seconds = Math.round(totalSeconds)
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+
+    if (hours > 0) {
+        return `${hours}h ${minutes}m`
+    }
+    return `${minutes}m`
+}
+
+type LocalDateParts = {
+    year: number
+    month: number
+    day: number
+    hour: number
+    minute: number
+    second: number
+}
+
+function getLocalDateParts(timeZone: string, reference: Date = new Date()): LocalDateParts | null {
+    try {
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            hour12: false,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+        })
+
+        const parts = formatter.formatToParts(reference)
+        const map: Partial<Record<string, string>> = {}
+        for (const part of parts) {
+            if (part.type === 'literal') continue
+            map[part.type] = part.value
+        }
+
+        const year = Number(map.year)
+        const month = Number(map.month)
+        const day = Number(map.day)
+        const hour = Number(map.hour)
+        const minute = Number(map.minute)
+        const second = Number(map.second)
+
+        if ([year, month, day, hour, minute, second].some((value) => Number.isNaN(value))) {
+            return null
+        }
+
+        return { year, month, day, hour, minute, second }
+    } catch {
+        return null
+    }
+}
+
+function parseTime(time: string): { hour: number; minute: number } {
+    const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim())
+    if (!match) {
+        return { hour: 0, minute: 0 }
+    }
+    const hour = Math.min(23, Math.max(0, Number(match[1])))
+    const minute = Math.min(59, Math.max(0, Number(match[2])))
+    return { hour, minute }
+}
+
+function hasReachedDigestTime(local: LocalDateParts, digest: { hour: number; minute: number }): boolean {
+    if (local.hour > digest.hour) return true
+    if (local.hour === digest.hour && local.minute >= digest.minute) return true
+    return false
+}
+
+function getWordleDayForZone(timeZone: string, reference: Date = new Date()): number {
+    const local = getLocalDateParts(timeZone, reference)
+    if (!local) {
+        return getWordleDay(reference)
+    }
+    const currentMidnightUtc = Date.UTC(local.year, local.month - 1, local.day)
+    return Math.floor((currentMidnightUtc - WORDLE_EPOCH_UTC) / MS_PER_DAY) + 1
+}
+
+function getLocalDayOfWeek(timeZone: string, reference: Date = new Date()): number {
+    const local = getLocalDateParts(timeZone, reference)
+    if (!local) return reference.getDay()
+    const utcDate = new Date(Date.UTC(local.year, local.month - 1, local.day))
+    return utcDate.getUTCDay()
 }
