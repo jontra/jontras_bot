@@ -188,11 +188,12 @@ bot.onSlashCommand('podium', async (handler, { channelId, args }) => {
     const lines = podium.map((entry, index) => {
         const medal = AWARDS[index] ?? `${index + 1}.`
         const players = entry.playerIds.map(formatMention).join(', ')
-        return `${medal} ${players} — ${entry.guesses}/6`
+        return `${medal} ${players} — ${entry.guesses}/6\n`
     })
 
     const mentions = buildMentions(podium.flatMap((entry) => entry.playerIds))
-    await handler.sendMessage(channelId, [`Wordle ${dayArg} podium:`, '', ...lines].join('\n'), { mentions })
+    const textLines = [`Wordle ${dayArg} podium:`, '', ...lines]
+    await handler.sendMessage(channelId, textLines.join('\r\n'), { mentions })
 })
 
 bot.onSlashCommand('today', async (handler, { channelId }) => {
@@ -271,7 +272,8 @@ async function respondWithLeaderboard(
         return
     }
 
-    await handler.sendMessage(channelId, section.text, { mentions: buildMentions(section.playerIds) })
+    const text = section.text.replace(/\n/g, '\r\n')
+    await handler.sendMessage(channelId, text, { mentions: buildMentions(section.playerIds) })
 }
 
 async function loadChannelResults(handler: BotHandler, channelId: string) {
@@ -383,7 +385,9 @@ async function runDailyDigest(reference: Date = new Date()): Promise<number> {
                 continue
             }
 
-            const message = sections.map((section) => section.text).join('\n\n')
+            const message = sections
+                .map((section) => section.text.replace(/\n/g, '\r\n'))
+                .join('\r\n')
             const mentions = buildMentions(sections.flatMap((section) => section.playerIds))
             await bot.sendMessage(channelId, message, { mentions })
             await markPodiumSent(channelId, targetDay)
@@ -419,10 +423,11 @@ function buildLeaderboardSection(title: string, leaderboard: Record<string, numb
     const sorted = Object.entries(leaderboard).sort((a, b) => b[1] - a[1])
     const lines = sorted.map(([playerId, value], index) => {
         const medal = AWARDS[index] ?? `${index + 1}.`
-        return `${medal} ${formatMention(playerId)} — ${value.toFixed(2)} ${unit}`
+        return `${medal} ${formatMention(playerId)} — ${value.toFixed(2)} ${unit}\n`
     })
 
-    const text = `**${title}**\n\n${lines.map((line) => `${line}\n`).join('')}`
+    const textLines = ['**' + title + '**', '', ...lines]
+    const text = textLines.join('\n')
     const playerIds = sorted.map(([playerId]) => playerId)
     return { text, playerIds }
 }

@@ -64,8 +64,14 @@ export async function getChannelSubmissions(channelId: string): Promise<WordleRe
 
 export async function getActiveChannels(): Promise<string[]> {
     const client = ensureDb()
-    const rows = await client.selectDistinct({ channelId: submissions.channelId }).from(submissions)
-    return rows.map((row) => row.channelId)
+    const fromSubmissions = await client.selectDistinct({ channelId: submissions.channelId }).from(submissions)
+    const fromSettings = await client.select({ channelId: chatSettings.channelId }).from(chatSettings)
+
+    const ids = new Set<string>()
+    for (const row of fromSubmissions) ids.add(row.channelId)
+    for (const row of fromSettings) ids.add(row.channelId)
+
+    return [...ids]
 }
 
 export async function markPodiumSent(channelId: string, wordleDay: number): Promise<boolean> {
