@@ -86,8 +86,9 @@ Use ephemeral responses for admin/config commands where appropriate.
 3. **Config & notifications (completed)**
    - ✅ `/config show` & `/config set` commands backed by Postgres settings.
    - ✅ Timing/leaderboard alerts and early podium honors per-channel switches, daily digests respect per-channel timezone + digest time.
-4. **Podium media & scheduled digests**
-   - Implement image generation + attachments; add daily/weekly scheduler that reads chat settings and posts recaps.
+4. **Podium media & scheduled digests (completed)**
+   - ✅ Podium images rendered via Sharp and attached to early/digest messages.
+   - ✅ `/digest` respects per-channel schedule while shipping podium art plus leaderboard summaries.
 5. **Advanced features**
    - TBD (future growth ideas once core experience is stable).
 6. **QA & deployment**

@@ -1,4 +1,6 @@
 import { makeTownsBot, type BotHandler } from '@towns-protocol/bot'
+import { TownsService } from '@towns-protocol/sdk'
+import sharp from 'sharp'
 import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import commands from './commands'
@@ -12,6 +14,8 @@ import {
     getWeeklyScoresNow,
     getWordleDay,
     parseWordleResult,
+    renderPodiumImage,
+    type PodiumSlice,
     type WordleResult,
 } from './features/wordle'
 import {
@@ -33,6 +37,10 @@ const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SE
 })
 
 const AWARDS = ['🥇', '🥈', '🥉']
+const streamMetadataBaseUrl =
+    bot.client.config.services.find((service) => service.id === TownsService.StreamMetadata)?.url ?? null
+const getUserProfileUrl = (userId: string, size = '200x200') =>
+    streamMetadataBaseUrl ? `${streamMetadataBaseUrl}/user/${userId}/image?size=${size}` : null
 
 const MS_PER_MINUTE = 60 * 1000
 const MS_PER_DAY = 24 * 60 * MS_PER_MINUTE
@@ -55,7 +63,7 @@ const CONFIG_OPTIONS = {
         key: 'notifyLeaderboard' as const,
         label: 'Leaderboard alerts',
         kind: 'boolean',
-        description: 'DM players when they pass someone on the leaderboard.\n',
+        description: 'notify players when they pass someone on the leaderboard.\n',
     },
     notify_timing: {
         key: 'notifyTiming' as const,
@@ -188,12 +196,33 @@ bot.onSlashCommand('podium', async (handler, { channelId, args }) => {
     const lines = podium.map((entry, index) => {
         const medal = AWARDS[index] ?? `${index + 1}.`
         const players = entry.playerIds.map(formatMention).join(', ')
-        return `${medal} ${players} — ${entry.guesses}/6\n`
+        return `${medal} ${players} — ${entry.guesses}/6`
     })
 
-    const mentions = buildMentions(podium.flatMap((entry) => entry.playerIds))
     const textLines = [`Wordle ${dayArg} podium:`, '', ...lines]
-    await handler.sendMessage(channelId, textLines.join('\r\n'), { mentions })
+    const mentions = buildMentions(podium.flatMap((entry) => entry.playerIds))
+
+    let attachments:
+        | Array<{
+              type: 'chunked'
+              data: Uint8Array
+              filename: string
+              mimetype: string
+          }>
+        | undefined
+    try {
+        const podiumSlices: PodiumSlice[] = podium.map((entry, index) => ({
+            rank: index + 1,
+            guesses: entry.guesses,
+            players: entry.playerIds,
+            avatars: [],
+        }))
+        attachments = [await createPodiumAttachment(dayArg, podiumSlices)]
+    } catch (error) {
+        console.error('[podium command] failed to render image', error)
+    }
+
+    await handler.sendMessage(channelId, textLines.join('\r\n'), { mentions, attachments })
 })
 
 bot.onSlashCommand('today', async (handler, { channelId }) => {
@@ -360,6 +389,14 @@ async function runDailyDigest(reference: Date = new Date()): Promise<number> {
             }
 
             const sections: { text: string; playerIds: string[] }[] = []
+            let attachments:
+                | Array<{
+                      type: 'chunked'
+                      data: Uint8Array
+                      filename: string
+                      mimetype: string
+                  }>
+                | undefined
             const podium = getDayLeaderboardsMulti(results, targetDay)
             if (podium.length > 0) {
                 const lines = podium.map((entry, index) => {
@@ -368,8 +405,20 @@ async function runDailyDigest(reference: Date = new Date()): Promise<number> {
                     return `${medal} ${players} — ${entry.guesses}/6`
                 })
                 const playerIds = podium.flatMap((entry) => entry.playerIds)
-                const text = ['**Wordle ' + targetDay + ' podium**', '', ...lines.map((line) => `${line}\n`)].join('\n')
+                const text = ['**Wordle ' + targetDay + ' podium**', '', ...lines].join('\r\n')
                 sections.push({ text, playerIds })
+
+                try {
+                    const podiumSlices: PodiumSlice[] = podium.map((entry, index) => ({
+                        rank: index + 1,
+                        guesses: entry.guesses,
+                        players: entry.playerIds,
+                        avatars: [],
+                    }))
+                    attachments = [await createPodiumAttachment(targetDay, podiumSlices)]
+                } catch (error) {
+                    console.error('[digest] failed to render podium image', error)
+                }
             }
 
             const overallSection = buildLeaderboardSection('Overall scores', getScores(results), 'pts.')
@@ -385,11 +434,9 @@ async function runDailyDigest(reference: Date = new Date()): Promise<number> {
                 continue
             }
 
-            const message = sections
-                .map((section) => section.text.replace(/\n/g, '\r\n'))
-                .join('\r\n')
+            const message = sections.map((section) => section.text.replace(/\n/g, '\r\n')).join('\r\n\r\n')
             const mentions = buildMentions(sections.flatMap((section) => section.playerIds))
-            await bot.sendMessage(channelId, message, { mentions })
+            await bot.sendMessage(channelId, message, { mentions, attachments })
             await markPodiumSent(channelId, targetDay)
             sentCount++
         }
@@ -430,6 +477,115 @@ function buildLeaderboardSection(title: string, leaderboard: Record<string, numb
     const text = textLines.join('\n')
     const playerIds = sorted.map(([playerId]) => playerId)
     return { text, playerIds }
+}
+
+async function createPodiumAttachment(day: number, podium: PodiumSlice[]) {
+    const uniqueIds = [...new Set(podium.flatMap((entry) => entry.players))]
+    const avatarMap = await fetchProfileImages(uniqueIds)
+    const podiumWithAvatars = await Promise.all(
+        podium.map(async (entry) => {
+            const avatars = await Promise.all(
+                entry.players.map(async (playerId) => {
+                    const raw = avatarMap.get(playerId)
+                    if (!raw) return undefined
+                    try {
+                        const processed = await sharp(raw.data)
+                            .resize(148, 148, { fit: 'cover' })
+                            .png()
+                            .toBuffer()
+                        console.log(
+                            `[podium-image] converted avatar ${playerId} original=${raw.mime} bytes=${raw.data.length} -> png bytes=${processed.length}`,
+                        )
+                        return { data: new Uint8Array(processed), mime: 'image/png' }
+                    } catch (error) {
+                        console.error(`[podium-image] failed to convert avatar for ${playerId}`, error)
+                        return undefined
+                    }
+                }),
+            )
+            return { ...entry, avatars }
+        }),
+    )
+
+    podiumWithAvatars.forEach((entry) => {
+        entry.players.forEach((playerId, idx) => {
+            const avatar = entry.avatars?.[idx]
+            if (avatar) {
+                console.log(`[podium-image] ${playerId} final avatar bytes=${avatar.data.length} mime=${avatar.mime}`)
+            } else {
+                console.warn(`[podium-image] ${playerId} missing avatar`)
+            }
+        })
+    })
+
+    const buffer = await renderPodiumImage(day, podiumWithAvatars)
+    return {
+        type: 'chunked' as const,
+        data: new Uint8Array(buffer),
+        filename: `wordle-${day}-podium.png`,
+        mimetype: 'image/png',
+    }
+}
+
+async function fetchProfileImages(
+    userIds: string[],
+    size = '220x220',
+): Promise<Map<string, { data: Uint8Array; mime: string }>> {
+    const result = new Map<string, { data: Uint8Array; mime: string }>()
+    if (!streamMetadataBaseUrl) {
+        return result
+    }
+    const uniqueIds = [...new Set(userIds)]
+    await Promise.all(
+        uniqueIds.map(async (userId) => {
+            const url = getUserProfileUrl(userId, size)
+            if (!url) return
+            try {
+                console.log(`[profile-image] fetching ${url}`)
+                const response = await fetch(url, { headers: { accept: 'image/*,image/png,image/jpeg,image/webp' } })
+                if (!response.ok) {
+                    console.warn(`[profile-image] ${url} returned status ${response.status}`)
+                    return
+                }
+                const arrayBuffer = await response.arrayBuffer()
+                if (arrayBuffer.byteLength === 0) {
+                    console.warn(`[profile-image] ${url} returned empty body`)
+                    return
+                }
+                const mime = response.headers.get('content-type') ?? 'image/png'
+                const data = new Uint8Array(arrayBuffer)
+                // Some endpoints return a small text payload like "profileImage not found".
+                if (mime.startsWith('text/') || looksLikeText(data)) {
+                    const sample = Buffer.from(data.slice(0, 32)).toString('utf8')
+                    console.warn(`[profile-image] ${url} returned text payload (${sample}), skipping`)
+                    return
+                }
+                console.log(`[profile-image] ok mime=${mime} bytes=${data.length}`)
+                result.set(userId, { data, mime })
+            } catch (error) {
+                console.error(`[profile-image] failed for ${userId}`, error)
+            }
+        }),
+    )
+    return result
+}
+
+function looksLikeText(data: Uint8Array): boolean {
+    const sample = data.slice(0, Math.min(data.length, 64))
+    let asciiCount = 0
+    for (const byte of sample) {
+        if (byte === 0) return false
+        if (byte === 9 || byte === 10 || byte === 13) {
+            asciiCount++
+            continue
+        }
+        if (byte >= 32 && byte <= 126) {
+            asciiCount++
+            continue
+        }
+        return false
+    }
+    return asciiCount === sample.length
 }
 
 function buildSettingsMessage(settings: ChatSettingsRecord): string {
@@ -525,7 +681,7 @@ async function maybeSendEarlyPodium(
     const todaysResults = results.filter((entry) => entry.wordleDay === wordleDay)
     const uniquePlayers = new Set(todaysResults.map((entry) => entry.playerId))
 
-    if (uniquePlayers.size !== settings.earlyPodiumThreshold) {
+    if (uniquePlayers.size < settings.earlyPodiumThreshold) {
         return
     }
 
@@ -539,11 +695,29 @@ async function maybeSendEarlyPodium(
     })
 
     const mentions = buildMentions(podium.flatMap((entry) => entry.playerIds))
-    await handler.sendMessage(
-        channelId,
-        [`Early podium unlocked for Wordle ${wordleDay}!`, '', ...lines].join('\n'),
-        { mentions },
-    )
+    const text = [`Early podium unlocked for Wordle ${wordleDay}!`, '', ...lines].join('\r\n')
+
+    let attachments:
+        | Array<{
+              type: 'chunked'
+              data: Uint8Array
+              filename: string
+              mimetype: string
+          }>
+        | undefined
+    try {
+        const podiumSlices: PodiumSlice[] = podium.map((entry, index) => ({
+            rank: index + 1,
+            guesses: entry.guesses,
+            players: entry.playerIds,
+            avatars: [],
+        }))
+        attachments = [await createPodiumAttachment(wordleDay, podiumSlices)]
+    } catch (error) {
+        console.error('[early podium] failed to render image', error)
+    }
+
+    await handler.sendMessage(channelId, text, { mentions, attachments })
 }
 
 async function maybeNotifyTiming(
