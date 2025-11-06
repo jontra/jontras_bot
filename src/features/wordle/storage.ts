@@ -19,14 +19,21 @@ export class DuplicateSubmissionError extends Error {
 export async function saveSubmission(channelId: string, result: WordleResult): Promise<void> {
     const client = ensureDb()
     try {
-        await client.insert(submissions).values({
-            channelId,
-            playerId: result.playerId,
-            wordleDay: result.wordleDay,
-            guesses: result.guesses,
-            hardMode: result.hardMode,
-            grid: result.grid,
-            solvedAt: result.submittedAt,
+        await client.transaction(async (tx) => {
+            await tx
+                .insert(chatSettings)
+                .values({ channelId })
+                .onConflictDoNothing({ target: chatSettings.channelId })
+
+            await tx.insert(submissions).values({
+                channelId,
+                playerId: result.playerId,
+                wordleDay: result.wordleDay,
+                guesses: result.guesses,
+                hardMode: result.hardMode,
+                grid: result.grid,
+                solvedAt: result.submittedAt,
+            })
         })
     } catch (error: unknown) {
         if (isUniqueViolation(error)) {
@@ -63,12 +70,21 @@ export async function upsertChatSettings(channelId: string) {
         .onConflictDoNothing({ target: chatSettings.channelId })
 }
 
-export async function markPodiumSent(channelId: string, wordleDay: number) {
+export async function getActiveChannels(): Promise<string[]> {
     const client = ensureDb()
-    await client
+    const rows = await client.selectDistinct({ channelId: submissions.channelId }).from(submissions)
+    return rows.map((row) => row.channelId)
+}
+
+export async function markPodiumSent(channelId: string, wordleDay: number): Promise<boolean> {
+    const client = ensureDb()
+    const inserted = await client
         .insert(dailyDigestLog)
         .values({ channelId, wordleDay })
         .onConflictDoNothing({ target: [dailyDigestLog.channelId, dailyDigestLog.wordleDay] })
+        .returning({ channelId: dailyDigestLog.channelId })
+
+    return inserted.length > 0
 }
 
 export async function hasPodiumBeenSent(channelId: string, wordleDay: number): Promise<boolean> {

@@ -12,7 +12,15 @@ import {
     parseWordleResult,
     type WordleResult,
 } from './features/wordle'
-import { DuplicateSubmissionError, DatabaseNotConfiguredError, getChannelSubmissions, saveSubmission } from './features/wordle/storage'
+import {
+    DuplicateSubmissionError,
+    DatabaseNotConfiguredError,
+    getActiveChannels,
+    getChannelSubmissions,
+    hasPodiumBeenSent,
+    markPodiumSent,
+    saveSubmission,
+} from './features/wordle/storage'
 
 const bot = await makeTownsBot(process.env.APP_PRIVATE_DATA!, process.env.JWT_SECRET!, {
     commands,
@@ -114,6 +122,15 @@ const { jwtMiddleware, handler } = bot.start()
 const app = new Hono()
 app.use(logger())
 app.post('/webhook', jwtMiddleware, handler)
+app.post('/digest', async (c) => {
+    try {
+        const sent = await runDailyDigest()
+        return c.json({ sent })
+    } catch (error) {
+        console.error('[digest] failed', error)
+        return c.text('Digest failed', 500)
+    }
+})
 
 export default app
 
@@ -133,15 +150,13 @@ async function respondWithLeaderboard(
         return
     }
 
-    const sorted = Object.entries(leaderboard).sort((a, b) => b[1] - a[1])
-    const lines = sorted.map(([playerId, value], index) => {
-        const medal = AWARDS[index] ?? `${index + 1}.`
-        return `${medal} ${formatMention(playerId)} — ${value.toFixed(2)} ${unit}`
-    })
+    const section = buildLeaderboardSection(capitalize(label), leaderboard, unit)
+    if (!section) {
+        await handler.sendMessage(channelId, `No ${label} data yet. Send a Wordle result to get started!`)
+        return
+    }
 
-    const mentions = buildMentions(sorted.map(([playerId]) => playerId))
-    const body = ['**' + capitalize(label) + '**', '', ...lines.map((line) => `${line}\n`)].join('\n')
-    await handler.sendMessage(channelId, body, { mentions })
+    await handler.sendMessage(channelId, section.text, { mentions: buildMentions(section.playerIds) })
 }
 
 async function loadChannelResults(handler: BotHandler, channelId: string) {
@@ -182,6 +197,55 @@ async function handleWordleSubmission(handler: BotHandler, channelId: string, pl
     }
 }
 
+async function runDailyDigest(wordleDay: number = getWordleDay()): Promise<number> {
+    const channels = await getActiveChannels()
+    let sentCount = 0
+
+    for (const channelId of channels) {
+        const alreadySent = await hasPodiumBeenSent(channelId, wordleDay)
+        if (alreadySent) continue
+
+        const results = await getChannelSubmissions(channelId)
+        if (!results.some((result) => result.wordleDay === wordleDay)) {
+            continue
+        }
+
+        const sections: { text: string; playerIds: string[] }[] = []
+        const podium = getDayLeaderboardsMulti(results, wordleDay)
+        if (podium.length > 0) {
+            const lines = podium.map((entry, index) => {
+                const medal = AWARDS[index] ?? `${index + 1}.`
+                const players = entry.playerIds.map(formatMention).join(', ')
+                return `${medal} ${players} — ${entry.guesses}/6`
+            })
+            const playerIds = podium.flatMap((entry) => entry.playerIds)
+            const text = ['**Wordle ' + wordleDay + ' podium**', '', ...lines.map((line) => `${line}\n`)].join('\n')
+            sections.push({ text, playerIds })
+        }
+
+        const overallSection = buildLeaderboardSection('Overall scores', getScores(results), 'pts.')
+        if (overallSection) sections.push(overallSection)
+
+        const weeklySection = buildLeaderboardSection('Weekly wins', getWeeklyScoresNow(results), 'wins')
+        if (weeklySection) sections.push(weeklySection)
+
+        const averagesSection = buildLeaderboardSection('Average guesses', getAverages(results), 'avg guesses')
+        if (averagesSection) sections.push(averagesSection)
+
+        if (sections.length === 0) {
+            continue
+        }
+
+        const message = sections.map((section) => section.text).join('\n\n')
+        const mentions = buildMentions(sections.flatMap((section) => section.playerIds))
+        await bot.sendMessage(channelId, message, { mentions })
+        await markPodiumSent(channelId, wordleDay)
+        sentCount++
+    }
+
+    return sentCount
+}
+
 function formatMention(playerId: string) {
     return `<@${playerId}>`
 }
@@ -197,4 +261,20 @@ function buildMentions(playerIds: string[]) {
         displayName: userId,
         mentionBehavior: { case: undefined, value: undefined },
     }))
+}
+
+function buildLeaderboardSection(title: string, leaderboard: Record<string, number>, unit: string) {
+    if (Object.keys(leaderboard).length === 0) {
+        return null
+    }
+
+    const sorted = Object.entries(leaderboard).sort((a, b) => b[1] - a[1])
+    const lines = sorted.map(([playerId, value], index) => {
+        const medal = AWARDS[index] ?? `${index + 1}.`
+        return `${medal} ${formatMention(playerId)} — ${value.toFixed(2)} ${unit}`
+    })
+
+    const text = `**${title}**\n\n${lines.map((line) => `${line}\n`).join('')}`
+    const playerIds = sorted.map(([playerId]) => playerId)
+    return { text, playerIds }
 }
