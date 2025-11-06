@@ -79,7 +79,7 @@ Use ephemeral responses for admin/config commands where appropriate.
 ### Implementation phases
 1. **Foundation (in progress)**
    - ✅ Drizzle + PostgreSQL scaffolding committed (config, schema, helper). Migrations will run after provisioning Render Postgres.
-   - ☐ Port Wordle parser + stats math into `src/features`.
+   - ✅ Ported Wordle parser + statistics utilities into `src/features/wordle`.
 2. **Core flows**
    - Implement `onMessage` Wordle ingestion plus `/scores|averages|weekly|podium` commands.
    - Add `/help`, `/ping`, `/today` parity.
