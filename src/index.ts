@@ -182,7 +182,20 @@ bot.onSlashCommand('alltime', async (handler, { channelId }) => {
 })
 
 bot.onSlashCommand('podium', async (handler, { channelId, args }) => {
-    const dayArg = args[0] ? Number.parseInt(args[0], 10) : getWordleDay()
+    await handleDailyPodiumCommand(handler, channelId, args[0])
+})
+
+bot.onSlashCommand('podium-weekly', async (handler, { channelId }) => {
+    const targetDay = getWordleDay()
+    await handleDailyPodiumCommand(handler, channelId, String(targetDay))
+})
+
+bot.onSlashCommand('podium-alltime', async (handler, { channelId }) => {
+    await handleAllTimePodium(handler, channelId)
+})
+
+async function handleDailyPodiumCommand(handler: BotHandler, channelId: string, arg?: string) {
+    const dayArg = arg ? Number.parseInt(arg, 10) : getWordleDay()
     if (Number.isNaN(dayArg)) {
         await handler.sendMessage(channelId, 'Please provide a valid Wordle day (e.g., `/podium 1599`).')
         return
@@ -227,8 +240,52 @@ bot.onSlashCommand('podium', async (handler, { channelId, args }) => {
     }
 
     await handler.sendMessage(channelId, textLines.join('\r\n'), { mentions, attachments })
-})
+}
 
+async function handleAllTimePodium(handler: BotHandler, channelId: string) {
+    const results = await loadChannelResults(handler, channelId)
+    if (!results) return
+
+    const scores = getScores(results)
+    const leaderboard = Object.entries(scores)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+
+    if (leaderboard.length === 0) {
+        await handler.sendMessage(channelId, 'No Wordles have been recorded yet.')
+        return
+    }
+
+    const lines = leaderboard.map(([playerId, points], index) => {
+        const medal = AWARDS[index] ?? `${index + 1}.`
+        return `${medal} ${formatMention(playerId)} — ${points.toFixed(2)} pts.\n`
+    })
+
+    const textLines = ['All-time Wordle podium:', '', ...lines]
+    const mentions = buildMentions(leaderboard.map(([playerId]) => playerId))
+
+    let attachments:
+        | Array<{
+              type: 'chunked'
+              data: Uint8Array
+              filename: string
+              mimetype: string
+          }>
+        | undefined
+    try {
+        const podiumSlices: PodiumSlice[] = leaderboard.map(([playerId, _], index) => ({
+            rank: index + 1,
+            guesses: 0,
+            players: [playerId],
+            avatars: [],
+        }))
+        attachments = [await createPodiumAttachment(getWordleDay(), podiumSlices)]
+    } catch (error) {
+        console.error('[podium-alltime] failed to render image', error)
+    }
+
+    await handler.sendMessage(channelId, textLines.join('\r\n'), { mentions, attachments })
+}
 bot.onSlashCommand('today', async (handler, { channelId }) => {
     await handler.sendMessage(channelId, `Today’s Wordle number is ${getWordleDay()}.`)
 })
